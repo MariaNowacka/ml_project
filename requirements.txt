@@ -11,3 +11,5 @@ seaborn>=0.13
 torch>=2.1          # if using deep learning
 wandb>=0.16         # alternative to MLflow
 statsmodels
+shap
+arch
