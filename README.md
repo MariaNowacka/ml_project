@@ -1,72 +1,96 @@
-# ml_project
-Financial Market Prediction &amp; Trading Strategy
+# Predicting Daily S&P 500 Movements from Constituent Returns
 
-Portfolio Optimization & ML Forecasting
-This project analyzes a selection of ten major stock tickers using Modern Portfolio Theory (MPT) to optimize portfolio weights. Additionally, it integrates machine learning to forecast future stock prices and calculates potential downside risk for a recurring monthly investment strategy
+A machine-learning study testing whether the **next-day movement of the S&P 500** (via the SPY ETF) can be predicted from the **same-day returns of 12 large-cap constituents**. The problem is framed two ways — regression (predict the return) and classification (predict up/down) — tackled with three model families and evaluated with walk-forward validation against trivial baselines.
 
+**Headline result:** none of the models beat a trivial baseline. Daily SPY movements are not predictable from same-day constituent returns — a result consistent with the weak form of the efficient-market hypothesis. The limitation is the data, not the models or their hyperparameters.
 
+## Problem setup
 
-Core Features
-Automated Data Acquisition: Retrieves historical adjusted close prices from January 2021 to April 2026 using the yfinance API.  
+- **Features:** same-day percentage returns of 12 large-cap tickers — AAPL, MSFT, GOOGL, AMZN, NVDA, JPM, BAC, GS, XOM, GLD, JNJ, KO.
+- **Target:** the **next-day** SPY return, created with `shift(-1)` so the model always predicts the future from the present — no look-ahead leakage.
+- **Period:** daily data from 2005-02-25 onward, trimmed to the range where all tickers have data.
 
-Sharpe Ratio Maximization: Utilizes the pypfopt library to calculate the Efficient Frontier by evaluating historical returns and sample covariance.  
+## Two tasks
 
-Actionable Allocation: Outputs precise dollar amounts for a $500 monthly contribution across the optimized assets.  
+| Notebook | Task | Target | Metric | Baseline |
+|---|---|---|---|---|
+| `notebooks/ML_methods_price_pred.ipynb` | Regression | next-day SPY return | MAE | predict 0 / predict train mean |
+| `notebooks/ML_methods_up_pred.ipynb` | Classification | next-day up/down | Accuracy | always predict "up" |
 
-Time-Series Forecasting: Deploys the prophet machine learning model to generate 12-month price predictions for tech, healthcare, and defensive benchmark stocks.  
+## Models
 
-Value at Risk (VaR): Estimates the 95% monthly VaR to quantify the potential loss of the monthly contribution during high-volatility periods.  
+Three model families, evaluated identically across both tasks:
 
+- **XGBoost** — gradient-boosted trees, one day of returns at a time.
+- **LightGBM** — a second boosting library, used as a cross-check that results are not specific to one implementation.
+- **Transformer** — a sequence model that sees a 10-day window of returns (with a learned positional encoding) rather than a single day.
 
-FOR Portfolio optimizer:
+## Methodology
 
-Key Features
-Data Pipeline: Automated historical data acquisition via yfinance.
+- **Walk-forward validation** (`TimeSeriesSplit`, 5 folds) — always train on the past, test on the future. Data is never shuffled, which would leak future information into training.
+- **Leakage control** — scaling and sequence-building are fitted inside each fold on its training part only, then applied to that fold's test part.
+- **Fair baselines** — computed within each fold, so models are compared against a same-period reference even as volatility changes between periods.
+- **Hyperparameter tuning** — Optuna (classification notebook), optimizing *accuracy − baseline* (the edge over "always up") rather than raw accuracy, so the search isn't rewarded for simply landing on folds with a higher up-share.
+- **Experiment tracking** — MLflow logs parameters, per-fold metrics, and each Optuna trial as a nested run.
 
-Markowitz Baseline: Calculates a static optimal portfolio using PyPortfolioOpt on training data to establish a rigorous performance benchmark.
+## Results
 
-Deep Learning Oracle: A robust Feedforward Neural Network (FNN) built with PyTorch, featuring Batch Normalization, LeakyReLU, and Dropout layers to combat financial noise and overfitting.
+- **Regression:** every model's MAE sits at or above the zero-baseline. The tree models collapse to predicting the mean; the Transformer adds movement but no direction, ending up worse than the flat baseline.
+- **Classification:** no model beats the "always up" baseline by a meaningful margin. Confusion matrices show the models default to the majority class ("up") rather than detecting direction, and the best Optuna-tuned result is well within noise (std ≈ 10× the mean edge over baseline).
 
-Active Trading Engine: Simulates daily portfolio rebalancing with smoothed execution (20% transition per day) and a defensive Cash-position logic when the network predicts negative returns across the board.
+## Project structure
 
-Quantitative Analytics: Automatically computes industry-standard metrics including CAGR, Annualized Volatility, Sharpe Ratio, Sortino Ratio, and Maximum Drawdown.
+```
+.
+├── notebooks/
+│   ├── ML_methods_price_pred.ipynb   # regression: next-day SPY return
+│   └── ML_methods_up_pred.ipynb      # classification: next-day direction (+ Optuna, MLflow)
+├── Data_clean/
+│   ├── Stocks clean/                 # one cleaned CSV per ticker: <ticker>_clean.csv
+│   └── ETF clean/
+│       └── spy_clean.csv             # SPY target series
+├── src/                              # supporting code
+├── requirements.txt                  # Python dependencies
+└── README.md
+```
 
-Advanced Visualization: Generates a 4-panel Matplotlib dashboard comparing cumulative returns, drawdown profiles, return distributions, and dynamic capital allocation.
+Each cleaned CSV is indexed by `Date` and contains a `Close` column, which is what the notebooks read.
 
-Requirements & Dependencies
-Ensure you have Python 3.9+ installed. You can install the required libraries using pip:
+## Setup
 
-pip install torch numpy pandas yfinance matplotlib seaborn scikit-learn pypfopt mlflow
+Requires Python 3.12. From the project root:
 
-At the very top of the script, you will find the Configuration & Dates section. You can manually adjust these parameters to backtest the strategy over different market regimes:
+```bash
+# create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-Python
-# Set the start date for training the neural network
-TRAIN_START = "2020-01-01" 
+# install dependencies
+pip install -r requirements.txt
+```
 
-# Set the active trading simulation period (Out-of-Sample)
-SIMULATION_START = "2024-06-01"
-SIMULATION_END = "2026-04-27"
+XGBoost needs the OpenMP runtime, which is not a Python package. On macOS install it once with Homebrew:
 
-# Sequence length (days of history the NN looks at to predict T+1)
-SEQ_LENGTH = 60 
+```bash
+brew install libomp
+```
 
-# Your portfolio assets
-TICKERS = ["UNH", "MSFT", "JPM", "LLY", "COST", "V", "WM", "NEE", "MSCI", "PG"]
+## Running
 
-Upon successful execution, the script will output two main artifacts:
+The notebooks live in `notebooks/` and read the data with relative paths (`../Data_clean/...`), so run them **from inside the `notebooks/` folder** (open the project folder in your editor and launch the notebook there):
 
-Console Tearsheet: A formatted table comparing the ML Portfolio directly against the S&P 500 benchmark across key risk/reward metrics.
+```bash
+jupyter lab notebooks/
+```
 
-Analytics Dashboard: A pop-up Matplotlib window containing:
+To browse the logged experiments and Optuna trials in the MLflow UI:
 
-Cumulative Capital Growth: A line chart showing the growth of the ML portfolio vs. the Baseline and S&P 500.
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
 
-Drawdown Profile: A visual representation of peak-to-trough declines.
+Then open `http://localhost:5000`.
 
-Daily Returns Distribution: A KDE plot to analyze skewness and fat tails.
+## Key takeaway
 
-Capital Allocation History: A stacked area chart showing exactly which assets the algorithm bought and sold over time (including white space for uninvested cash).
-
-🧪 Tracking with MLflow (Optional)
-The architecture is designed to be easily integrated with MLflow. If you wish to track your FNN training runs, simply uncomment/add the mlflow.start_run() wrappers around the PyTorch training loop to automatically log parameters, MSE loss, and models to your local MLflow UI.
+Across all three models, a 5-fold walk-forward, and Optuna tuning, next-day SPY movement could not be predicted from same-day constituent returns. A negative result, but a clean one — and exactly what weak-form market efficiency predicts.
