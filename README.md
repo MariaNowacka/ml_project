@@ -1,71 +1,77 @@
-# Predicting Daily S&P 500 Movements from Constituent Returns
+# Machine Learning on the S&P 500: Index Predictability and Stock Selection
 
-A machine-learning study testing whether the **next-day movement of the S&P 500** (via the SPY ETF) can be predicted from the **same-day returns of 12 large-cap constituents**. The problem is framed two ways — regression (predict the return) and classification (predict up/down) — tackled with three model families and evaluated with walk-forward validation against trivial baselines.
+A machine-learning study of the S&P 500 in two parts:
 
-**Headline result:** none of the models beat a trivial baseline. Daily SPY movements are not predictable from same-day constituent returns — a result consistent with the weak form of the efficient-market hypothesis. The limitation is the data, not the models or their hyperparameters.
+1. **Index predictability** — can the next-day move of the S&P 500 (SPY ETF) be predicted from the same-day returns of its large constituents?
+2. **Stock selection** — can a model pick the individual stocks that will *outperform* SPY over the next month, and can a portfolio of them beat the index?
 
-## Problem setup
+**Headline results:** the index itself is **not** predictable day-to-day (consistent with weak-form market efficiency), while the stock-selection strategy is evaluated honestly with a walk-forward backtest and SHAP-based interpretation of what drives its picks.
+
+## Part A — Is the index predictable?
+
+Two framings of the same question, one notebook each.
 
 - **Features:** same-day percentage returns of 12 large-cap tickers — AAPL, MSFT, GOOGL, AMZN, NVDA, JPM, BAC, GS, XOM, GLD, JNJ, KO.
 - **Target:** the **next-day** SPY return, created with `shift(-1)` so the model always predicts the future from the present — no look-ahead leakage.
-- **Period:** daily data from 2005-02-25 onward, trimmed to the range where all tickers have data.
-
-## Two tasks
+- **Period:** daily data from 2005-02-25 onward.
 
 | Notebook | Task | Target | Metric | Baseline |
 |---|---|---|---|---|
 | `notebooks/ML_methods_price_pred.ipynb` | Regression | next-day SPY return | MAE | predict 0 / predict train mean |
 | `notebooks/ML_methods_up_pred.ipynb` | Classification | next-day up/down | Accuracy | always predict "up" |
 
-## Models
+**Models:** XGBoost, LightGBM (cross-check against a second library), and a Transformer that reads a 10-day window of returns with a learned positional encoding.
 
-Three model families, evaluated identically across both tasks:
+**Methodology:**
 
-- **XGBoost** — gradient-boosted trees, one day of returns at a time.
-- **LightGBM** — a second boosting library, used as a cross-check that results are not specific to one implementation.
-- **Transformer** — a sequence model that sees a 10-day window of returns (with a learned positional encoding) rather than a single day.
+- **Walk-forward validation** (`TimeSeriesSplit`, 5 folds) — always train on the past, test on the future. Never shuffled.
+- **Leakage control** — scaling and sequence-building are fitted inside each fold on its training part only.
+- **Fair baselines** — computed within each fold, so comparisons hold even as volatility changes between periods.
+- **Tuning** — Optuna (classification), optimizing *accuracy − baseline* (the edge over "always up") rather than raw accuracy.
+- **Tracking** — MLflow logs parameters, per-fold metrics, and Optuna trials as nested runs.
 
-## Methodology
+**Results:** no model beats the trivial baseline. In regression the trees collapse to the mean and the Transformer adds movement but no direction; in classification the confusion matrices show every model defaulting to the majority class ("up"). Next-day SPY movement is not predictable from same-day constituent returns — the limitation is the data, not the models.
 
-- **Walk-forward validation** (`TimeSeriesSplit`, 5 folds) — always train on the past, test on the future. Data is never shuffled, which would leak future information into training.
-- **Leakage control** — scaling and sequence-building are fitted inside each fold on its training part only, then applied to that fold's test part.
-- **Fair baselines** — computed within each fold, so models are compared against a same-period reference even as volatility changes between periods.
-- **Hyperparameter tuning** — Optuna (classification notebook), optimizing *accuracy − baseline* (the edge over "always up") rather than raw accuracy, so the search isn't rewarded for simply landing on folds with a higher up-share.
-- **Experiment tracking** — MLflow logs parameters, per-fold metrics, and each Optuna trial as a nested run.
+## Part B — A stock-selection strategy
 
-## Results
+`notebooks/code_final.ipynb` flips the question: instead of forecasting the index, it predicts **which stocks will outperform SPY over the next 22 trading days**, builds a portfolio of the predicted out-performers, and backtests it.
 
-- **Regression:** every model's MAE sits at or above the zero-baseline. The tree models collapse to predicting the mean; the Transformer adds movement but no direction, ending up worse than the flat baseline.
-- **Classification:** no model beats the "always up" baseline by a meaningful margin. Confusion matrices show the models default to the majority class ("up") rather than detecting direction, and the best Optuna-tuned result is well within noise (std ≈ 10× the mean edge over baseline).
+- **Universe:** 27 large-caps mapped to their sector ETFs (XLK, XLV, XLF, XLC, XLY, XLP).
+- **Target:** binary — does a stock's forward 22-day return exceed SPY's over the same window?
+- **Backtest:** walk-forward with 22-day rebalancing from 2017, portfolio cumulative return compared against SPY, with **alpha** (excess return over SPY) as the headline metric.
+
+Two models are compared:
+
+- **Model 1 — ARIMA + GARCH + LightGBM.** An ARIMA forecast of relative performance and a GARCH volatility estimate are fed, alongside distance to the 200-day moving average, 20-day momentum, and local volatility, into a LightGBM classifier. SHAP shows the ARIMA signal dominating, with GARCH volatility a distant second.
+- **Model 2 — LightGBM on engineered features only.** Momentum (5/10/20/60-day), volatility (20/60-day), momentum relative to SPY and to the sector ETF, volume ratios, and calendar features — no ARIMA/GARCH. SHAP shows momentum (especially 60/5/10-day) and volatility carrying most of the weight.
+
+**Interpretability:** SHAP `TreeExplainer` is used throughout — global bar importance, beeswarm plots for the direction of each feature's effect, and per-stock waterfall plots (e.g. TSLA for Model 1, NVDA for Model 2) showing how each feature pushes a single prediction up or down. The final cell plots both strategies against the SPY benchmark and reports each model's alpha.
 
 ## Project structure
 
 ```
 .
 ├── notebooks/
-│   ├── ML_methods_price_pred.ipynb   # regression: next-day SPY return
-│   └── ML_methods_up_pred.ipynb      # classification: next-day direction (+ Optuna, MLflow)
+│   ├── ML_methods_price_pred.ipynb   # Part A: regression — next-day SPY return
+│   ├── ML_methods_up_pred.ipynb      # Part A: classification — next-day direction (Optuna, MLflow)
+│   └── code_final.ipynb              # Part B: stock-selection strategy (ARIMA+GARCH+LightGBM vs LightGBM, SHAP)
 ├── Data_clean/
 │   ├── Stocks clean/                 # one cleaned CSV per ticker: <ticker>_clean.csv
-│   └── ETF clean/
-│       └── spy_clean.csv             # SPY target series
+│   └── ETF clean/                    # SPY and sector ETFs, e.g. spy_clean.csv
 ├── src/                              # supporting code
 ├── requirements.txt                  # Python dependencies
 └── README.md
 ```
 
-Each cleaned CSV is indexed by `Date` and contains a `Close` column, which is what the notebooks read.
+Each cleaned CSV is indexed by `Date` and contains `Close` (Part B also uses `Volume`).
 
 ## Setup
 
 Requires Python 3.12. From the project root:
 
 ```bash
-# create and activate a virtual environment
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# install dependencies
 pip install -r requirements.txt
 ```
 
@@ -77,13 +83,13 @@ brew install libomp
 
 ## Running
 
-The notebooks live in `notebooks/` and read the data with relative paths (`../Data_clean/...`), so run them **from inside the `notebooks/` folder** (open the project folder in your editor and launch the notebook there):
+The Part A notebooks read data with relative paths (`../Data_clean/...`), so run them from inside the `notebooks/` folder:
 
 ```bash
 jupyter lab notebooks/
 ```
 
-To browse the logged experiments and Optuna trials in the MLflow UI:
+Browse logged experiments and Optuna trials in the MLflow UI:
 
 ```bash
 mlflow ui --backend-store-uri sqlite:///mlflow.db
@@ -93,4 +99,4 @@ Then open `http://localhost:5000`.
 
 ## Key takeaway
 
-Across all three models, a 5-fold walk-forward, and Optuna tuning, next-day SPY movement could not be predicted from same-day constituent returns. A negative result, but a clean one — and exactly what weak-form market efficiency predicts.
+The index is efficient on a daily horizon — none of the models in Part A beat a trivial baseline. Part B shifts from predicting the index to selecting stocks that outperform it, and uses SHAP to make the resulting models interpretable rather than black boxes.
